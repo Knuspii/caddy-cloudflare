@@ -1,14 +1,8 @@
-ARG CADDY_BUILDER_IMAGE=caddy:builder
-ARG CADDY_RUNTIME_IMAGE=caddy:latest
-
-FROM ${CADDY_BUILDER_IMAGE} AS builder
-
-ARG CLOUDFLARE_VERSION
+FROM docker.io/library/caddy:builder AS builder
 
 RUN xcaddy build \
-    --with github.com/caddy-dns/cloudflare@${CLOUDFLARE_VERSION} \
-    --output /usr/bin/caddy
+    --with github.com/caddy-dns/cloudflare
 
-FROM ${CADDY_RUNTIME_IMAGE}
+FROM docker.io/library/caddy:latest
 
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
