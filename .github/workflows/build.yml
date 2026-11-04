@@ -22,6 +22,10 @@ permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: caddy-cloudflare-build
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -30,27 +34,50 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Get latest versions
-        id: versions
+      - name: Get Cloudflare version
+        id: cloudflare
         shell: bash
         run: |
-          CADDY_VERSION=$(curl -fsSL \
-            https://api.github.com/repos/caddyserver/caddy/releases/latest \
-            | jq -r '.tag_name' | sed 's/^v//')
-
-          CLOUDFLARE_VERSION=$(curl -fsSL \
+          VERSION=$(curl -fsSL \
             https://proxy.golang.org/github.com/caddy-dns/cloudflare/@latest \
             | jq -r '.Version')
 
-          echo "caddy=$CADDY_VERSION" >> "$GITHUB_OUTPUT"
-          echo "cloudflare=$CLOUDFLARE_VERSION" >> "$GITHUB_OUTPUT"
+          if [[ -z "$VERSION" || "$VERSION" == "null" ]]; then
+            echo "Could not determine Cloudflare version"
+            exit 1
+          fi
 
-          echo "Caddy: $CADDY_VERSION"
-          echo "Cloudflare: $CLOUDFLARE_VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Cloudflare version: $VERSION"
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Get Caddy image digests
+        id: caddy
+        shell: bash
+        run: |
+          BUILDER_DIGEST=$(docker buildx imagetools inspect \
+            caddy:builder | awk '/^Digest:/ {print $2; exit}')
+
+          RUNTIME_DIGEST=$(docker buildx imagetools inspect \
+            caddy:latest | awk '/^Digest:/ {print $2; exit}')
+
+          if [[ -z "$BUILDER_DIGEST" || -z "$RUNTIME_DIGEST" ]]; then
+            echo "Could not determine Caddy image digests"
+            exit 1
+          fi
+
+          echo "builder=$BUILDER_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "runtime=$RUNTIME_DIGEST" >> "$GITHUB_OUTPUT"
+
+          echo "Builder: $BUILDER_DIGEST"
+          echo "Runtime: $RUNTIME_DIGEST"
 
       - name: Lowercase repository owner
         id: lowercase
-        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -59,28 +86,37 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup Buildx
-        uses: docker/setup-buildx-action@v3
-
       - name: Check if build is needed
         id: check
         env:
           OWNER: ${{ steps.lowercase.outputs.owner }}
-          CADDY_VERSION: ${{ steps.versions.outputs.caddy }}
-          CLOUDFLARE_VERSION: ${{ steps.versions.outputs.cloudflare }}
-          FORCE: ${{ inputs.force }}
+          BUILDER_DIGEST: ${{ steps.caddy.outputs.builder }}
+          RUNTIME_DIGEST: ${{ steps.caddy.outputs.runtime }}
+          CLOUDFLARE_VERSION: ${{ steps.cloudflare.outputs.version }}
+          FORCE: ${{ github.event_name == 'push' || inputs.force }}
+        shell: bash
         run: |
-          VERSION_TAG="ghcr.io/${OWNER}/caddy-cloudflare:caddy-${CADDY_VERSION}-cloudflare-${CLOUDFLARE_VERSION}"
+          BUILDER_SHORT="${BUILDER_DIGEST#sha256:}"
+          RUNTIME_SHORT="${RUNTIME_DIGEST#sha256:}"
+
+          BUILDER_SHORT="${BUILDER_SHORT:0:12}"
+          RUNTIME_SHORT="${RUNTIME_SHORT:0:12}"
+
+          VERSION_TAG="ghcr.io/${OWNER}/caddy-cloudflare:b${BUILDER_SHORT}-r${RUNTIME_SHORT}-cf-${CLOUDFLARE_VERSION}"
 
           echo "version_tag=$VERSION_TAG" >> "$GITHUB_OUTPUT"
 
-          if [[ "$FORCE" == "true" ]] || \
-             ! docker buildx imagetools inspect "$VERSION_TAG" >/dev/null 2>&1; then
+          if [[ "$FORCE" == "true" ]]; then
             echo "build=true" >> "$GITHUB_OUTPUT"
-            echo "New version combination detected."
-          else
+            echo "Forced rebuild requested."
+
+          elif docker buildx imagetools inspect "$VERSION_TAG" >/dev/null 2>&1; then
             echo "build=false" >> "$GITHUB_OUTPUT"
             echo "Everything is up to date. Skipping build."
+
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "New version combination detected."
           fi
 
       - name: Build and push
@@ -89,11 +125,15 @@ jobs:
         with:
           context: .
           push: true
+
           build-args: |
-            CADDY_VERSION=${{ steps.versions.outputs.caddy }}
-            CLOUDFLARE_VERSION=${{ steps.versions.outputs.cloudflare }}
+            CADDY_BUILDER_IMAGE=caddy:builder@${{ steps.caddy.outputs.builder }}
+            CADDY_RUNTIME_IMAGE=caddy:latest@${{ steps.caddy.outputs.runtime }}
+            CLOUDFLARE_VERSION=${{ steps.cloudflare.outputs.version }}
+
           tags: |
             ghcr.io/${{ steps.lowercase.outputs.owner }}/caddy-cloudflare:latest
             ${{ steps.check.outputs.version_tag }}
+
           cache-from: type=gha
           cache-to: type=gha,mode=max

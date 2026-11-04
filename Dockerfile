@@ -1,12 +1,14 @@
-ARG CADDY_VERSION=2.11.7
+ARG CADDY_BUILDER_IMAGE=caddy:builder
+ARG CADDY_RUNTIME_IMAGE=caddy:latest
 
-FROM caddy:${CADDY_VERSION}-builder AS builder
+FROM ${CADDY_BUILDER_IMAGE} AS builder
 
-ARG CLOUDFLARE_VERSION=v0.2.4
+ARG CLOUDFLARE_VERSION
 
 RUN xcaddy build \
-    --with github.com/caddy-dns/cloudflare@${CLOUDFLARE_VERSION}
+    --with github.com/caddy-dns/cloudflare@${CLOUDFLARE_VERSION} \
+    --output /usr/bin/caddy
 
-FROM caddy:${CADDY_VERSION}
+FROM ${CADDY_RUNTIME_IMAGE}
 
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
