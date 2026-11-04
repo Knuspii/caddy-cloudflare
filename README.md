@@ -4,7 +4,7 @@
 
 Custom Caddy Docker image with the [Cloudflare DNS Provider](https://github.com/caddy-dns/cloudflare) module.
 
-Daily automatic rebuilds to keep Caddy and its Cloudflare module up to date. \
+Weekly automatic rebuilds to keep Caddy and its Cloudflare module up to date. \
 This image is built using [xcaddy](https://github.com/caddyserver/xcaddy) and includes support for ACME DNS-01 challenges through Cloudflare.
 
 ## Features
