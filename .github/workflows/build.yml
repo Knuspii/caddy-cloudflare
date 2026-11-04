@@ -4,11 +4,19 @@ on:
   push:
     branches:
       - main
+    paths:
+      - Dockerfile
+      - .github/workflows/build.yml
 
   schedule:
     - cron: '0 23 * * *'
 
   workflow_dispatch:
+    inputs:
+      force:
+        description: Force rebuild
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -21,6 +29,24 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Get latest versions
+        id: versions
+        shell: bash
+        run: |
+          CADDY_VERSION=$(curl -fsSL \
+            https://api.github.com/repos/caddyserver/caddy/releases/latest \
+            | jq -r '.tag_name' | sed 's/^v//')
+
+          CLOUDFLARE_VERSION=$(curl -fsSL \
+            https://proxy.golang.org/github.com/caddy-dns/cloudflare/@latest \
+            | jq -r '.Version')
+
+          echo "caddy=$CADDY_VERSION" >> "$GITHUB_OUTPUT"
+          echo "cloudflare=$CLOUDFLARE_VERSION" >> "$GITHUB_OUTPUT"
+
+          echo "Caddy: $CADDY_VERSION"
+          echo "Cloudflare: $CLOUDFLARE_VERSION"
 
       - name: Lowercase repository owner
         id: lowercase
@@ -36,9 +62,38 @@ jobs:
       - name: Setup Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Check if build is needed
+        id: check
+        env:
+          OWNER: ${{ steps.lowercase.outputs.owner }}
+          CADDY_VERSION: ${{ steps.versions.outputs.caddy }}
+          CLOUDFLARE_VERSION: ${{ steps.versions.outputs.cloudflare }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          VERSION_TAG="ghcr.io/${OWNER}/caddy-cloudflare:caddy-${CADDY_VERSION}-cloudflare-${CLOUDFLARE_VERSION}"
+
+          echo "version_tag=$VERSION_TAG" >> "$GITHUB_OUTPUT"
+
+          if [[ "$FORCE" == "true" ]] || \
+             ! docker buildx imagetools inspect "$VERSION_TAG" >/dev/null 2>&1; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "New version combination detected."
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Everything is up to date. Skipping build."
+          fi
+
       - name: Build and push
+        if: steps.check.outputs.build == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ steps.lowercase.outputs.owner }}/caddy-cloudflare:latest
+          build-args: |
+            CADDY_VERSION=${{ steps.versions.outputs.caddy }}
+            CLOUDFLARE_VERSION=${{ steps.versions.outputs.cloudflare }}
+          tags: |
+            ghcr.io/${{ steps.lowercase.outputs.owner }}/caddy-cloudflare:latest
+            ${{ steps.check.outputs.version_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
